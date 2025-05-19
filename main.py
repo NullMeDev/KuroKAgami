@@ -12,11 +12,12 @@ import re
 import sqlite3
 import sys
 import logging
+import time
+import requests
 
 import feedparser
 import httpx
 import yaml
-import requests
 
 from bs4 import BeautifulSoup
 from rapidfuzz.fuzz import token_set_ratio
@@ -51,6 +52,33 @@ logger.info(f"Configured webhooks: {WEBHOOKS}")
 class Deal(dict):
     """Hold deal data"""
     pass
+
+def verify_webhook_config():
+    """Verify webhook configuration"""
+    logger.info("Verifying webhook configuration...")
+    if not WEBHOOKS:
+        logger.error("No webhooks configured!")
+        return False
+        
+    for hook in WEBHOOKS:
+        try:
+            test_payload = {
+                "content": "Test message - webhook verification",
+                "embeds": [{
+                    "title": "Webhook Test",
+                    "description": "This is a test message to verify webhook configuration",
+                    "color": CONF.get("colors", {}).get("default", 0)
+                }]
+            }
+            
+            logger.info(f"Testing webhook (first 20 chars): {hook[:20]}...")
+            resp = requests.post(hook, json=test_payload, timeout=15)
+            resp.raise_for_status()
+            logger.info(f"Webhook test successful! Response: {resp.status_code}")
+            return True
+        except Exception as e:
+            logger.error(f"Webhook test failed: {str(e)}")
+            return False
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run scraper")
@@ -103,7 +131,7 @@ async def fetch_json(url, client: httpx.AsyncClient):
     return r.json()
 
 def scrape_rss(entry):
-    """Synchronous RSS scraping"""
+    """Synchronous RSS scraping with enhanced logging"""
     logger.info(f"Processing RSS feed: {entry.get('url', '')}")
     feed = feedparser.parse(entry.get("url",""))
     
@@ -111,19 +139,34 @@ def scrape_rss(entry):
         logger.error(f"RSS Feed Error: {feed.bozo_exception}")
         return []
         
-    logger.info(f"Found {len(feed.entries)} entries")
+    logger.info(f"Found {len(feed.entries)} entries in feed")
     out = []
     for e in feed.entries[:20]:
-        out.append(Deal({
-            "title": e.get("title","")[:120],
-            "body": e.get("summary","")[:200],
-            "url": e.get("link",""),
+        title = e.get("title", "")[:120]
+        body = e.get("summary", "")[:200]
+        link = e.get("link", "")
+        
+        logger.info(f"Processing RSS entry: {title}")
+        
+        # Check if entry has required fields
+        if not all([title, link]):
+            logger.warning(f"Skipping RSS entry due to missing required fields: {title}")
+            continue
+            
+        deal = Deal({
+            "title": title,
+            "body": body,
+            "url": link,
             "source": entry.get("name",""),
             "fetched": datetime.datetime.utcnow().isoformat(),
             "tags": entry.get("tags", []),
-            "min_hot": entry.get("min_hot_score", CONF.get("global_min_hot",0.1)),
+            "min_hot": entry.get("min_hot_score", CONF.get("global_min_hot", 0.05)),
             "ttl_days": entry.get("ttl_days", CONF.get("ttl_default_days",30)),
-        }))
+        })
+        out.append(deal)
+        logger.info(f"Added deal: {deal['title']}")
+    
+    logger.info(f"Processed {len(out)} valid entries from RSS feed")
     return out
 
 async def scrape_html(entry, client):
@@ -144,7 +187,7 @@ async def scrape_html(entry, client):
             "source": entry.get("name",""),
             "fetched": datetime.datetime.utcnow().isoformat(),
             "tags": entry.get("tags", []),
-            "min_hot": entry.get("min_hot_score", CONF.get("global_min_hot",0.1)),
+            "min_hot": entry.get("min_hot_score", CONF.get("global_min_hot",0.05)),
             "ttl_days": entry.get("ttl_days", CONF.get("ttl_default_days",30)),
             "needs_js": entry.get("needs_js", False),
         }))
@@ -166,14 +209,17 @@ async def scrape_reddit(sub, client):
     return out
 
 def post_deals_to_discord(deals, timestamp):
-    """Post deals to Discord with better error handling"""
+    """Post deals to Discord with better error handling and logging"""
     if not WEBHOOKS:
-        logger.error("No webhooks configured!")
+        logger.error("No webhooks configured! Please set DISCORD_WEBHOOK in GitHub secrets")
         return
 
+    logger.info(f"Preparing to post {len(deals)} deals to {len(WEBHOOKS)} webhooks")
+    
     sf = sorted(deals, key=lambda x: x.get("fetched"), reverse=True)
     emb = {
         "title": f"Privacy Deals – {timestamp.strftime('%Y-%m-%d %H:%M UTC')}",
+        "description": f"Found {len(deals)} new deals",
         "fields": []
     }
     
@@ -182,21 +228,27 @@ def post_deals_to_discord(deals, timestamp):
         emb["color"] = col
         
     for d in sf[:5]:
+        logger.info(f"Adding deal to embed: {d['title']}")
         emb["fields"].append({
             "name": d["title"],
-            "value": f"{d['body']}\n{d['url']}",
+            "value": f"{d.get('body', 'No description')}\n{d['url']}",
             "inline": False
         })
 
     payload = {"embeds":[emb]}
+    logger.info(f"Payload prepared: {json.dumps(payload, indent=2)}")
     
     for hook in WEBHOOKS:
         try:
+            logger.info(f"Attempting to post to webhook (first 20 chars): {hook[:20]}...")
             resp = requests.post(hook, json=payload, timeout=15)
             resp.raise_for_status()
-            logger.info(f"Successfully posted to webhook")
+            logger.info(f"Successfully posted to webhook. Response: {resp.status_code}")
+            # Add a small delay between webhook calls
+            time.sleep(1)
         except Exception as e:
-            logger.error(f"Failed to post to webhook: {e}")
+            logger.error(f"Failed to post to webhook: {str(e)}")
+            logger.error(f"Response content: {getattr(resp, 'text', 'No response content')}")
 
 def post_no_deals_message(timestamp):
     """Post a message when no deals are found"""
@@ -229,6 +281,12 @@ def main():
     
     logger.info("Starting scraper run")
     logger.info(f"Webhooks configured: {WEBHOOKS}")
+    
+    # Verify webhook configuration
+    if not args.dry_run:
+        if not verify_webhook_config():
+            logger.error("Webhook verification failed! Check your configuration.")
+            # Continue anyway to generate metrics
 
     # Initialize metrics
     metrics = {
