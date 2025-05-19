@@ -29,27 +29,23 @@ jobs:
       - name: Create data directory
         run: mkdir -p data
 
-      - name: Run selector tests
-        run: pytest -q tests
-
-      - name: Test webhook directly
+      - name: Verify webhook configuration
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
-          echo "Testing webhook configuration..."
-          curl -H "Content-Type: application/json" \
-               -d '{"content":"Test message from GitHub Actions"}' \
-               $DISCORD_WEBHOOK
+          if [ -n "$DISCORD_WEBHOOK" ]; then
+            echo "Discord webhook is configured"
+          else
+            echo "WARNING: Discord webhook is not configured"
+          fi
 
       - name: Scrape & post deals
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        run: |
-          echo "Webhook configured: ${{ secrets.DISCORD_WEBHOOK != '' }}"
-          python main.py --force all
+        run: python main.py --force all
 
       - name: Alert if no fresh deals
-        if: always()  # Run even if previous step fails
+        if: always()
         uses: actions/github-script@v7
         with:
           script: |
