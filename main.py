@@ -2,103 +2,113 @@
 
 import feedparser import httpx import yaml from bs4 import BeautifulSoup from rapidfuzz.fuzz import token_set_ratio from tenacity import retry, stop_after_attempt, wait_exponential
 
-───────────────────────── CONFIG ─────────────────────────
+CONFIGURATION
 
 ROOT = os.path.dirname(file) CONF = yaml.safe_load(open(os.path.join(ROOT, "config/sources.yaml"))) DB_PATH = os.path.join(ROOT, "data/deals.sqlite")
 
 Support multiple webhooks via DISCORD_WEBHOOKS or single via DISCORD_WEBHOOK
 
-webhooks_env = os.getenv("DISCORD_WEBHOOKS", "") single_webhook = os.getenv("DISCORD_WEBHOOK", "") if webhooks_env: WEBHOOKS = [w.strip() for w in webhooks_env.split(",") if w.strip()] elif single_webhook: WEBHOOKS = [single_webhook] else: WEBHOOKS = []  # no webhooks configured
+env_hooks = os.getenv("DISCORD_WEBHOOKS", "") single_hook = os.getenv("DISCORD_WEBHOOK", "") if env_hooks: WEBHOOKS = [h.strip() for h in env_hooks.split(",") if h.strip()] elif single_hook: WEBHOOKS = [single_hook] else: WEBHOOKS = []
 
 class Deal(dict): """Hold deal data""" pass
 
-─────────────────── ARGPARSE CLI ─────────────────────────
+CLI ARGUMENTS
 
-def parse_args(): p = argparse.ArgumentParser(description="Run scraper") p.add_argument("--dry-run", action="store_true", help="Print parsed deals, don’t post to Discord") p.add_argument("--source", type=str, help="Only process one source by name/subreddit") p.add_argument("--force", choices=["rss","html","reddit","all"], help="Ignore schedule and force-fetch specific type") return p.parse_args()
+def parse_args(): parser = argparse.ArgumentParser(description="Run scraper") parser.add_argument("--dry-run", action="store_true", help="Print deals without posting") parser.add_argument("--source", type=str, help="Filter by a single source/subreddit") parser.add_argument("--force", choices=["rss","html","reddit","all"], help="Force fetch specific type") return parser.parse_args()
 
-─────────────────── DB FUNCTIONS ─────────────────────────
+DATABASE
 
 def db_connect(): conn = sqlite3.connect(DB_PATH) conn.execute("CREATE TABLE IF NOT EXISTS seen (sig TEXT PRIMARY KEY, posted_at TEXT)") return conn
 
-────────────────── FETCH UTILITIES ───────────────────────
+FETCH UTILITIES
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30)) async def fetch_html(url, client: httpx.AsyncClient): r = await client.get(url, timeout=20) r.raise_for_status() return r.text
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30)) async def fetch_html(url, client: httpx.AsyncClient): response = await client.get(url, timeout=20) response.raise_for_status() return response.text
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30)) async def fetch_json(url, client: httpx.AsyncClient): r = await client.get(url, timeout=20) r.raise_for_status() return r.json()
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30)) async def fetch_json(url, client: httpx.AsyncClient): response = await client.get(url, timeout=20) response.raise_for_status() return response.json()
 
-─────────────────── PARSERS ─────────────────────────────
+PARSERS
 
-async def scrape_reddit(sub, client): data = await fetch_json(f"https://www.reddit.com/r/{sub}/new.json?limit=20", client) out = [] for post in data.get("data", {}).get("children", []): d = post["data"] out.append(Deal({ "title": d.get("title",""), "body": f"score {d.get('score',0)} · {d.get('num_comments',0)} comments", "url": f"https://reddit.com{d.get('permalink','')}", "source": f"r/{sub}", "fetched": datetime.datetime.utcnow().isoformat(), "tags": [], })) return out
+async def scrape_reddit(sub, client): data = await fetch_json(f"https://www.reddit.com/r/{sub}/new.json?limit=20", client) results = [] for item in data.get("data", {}).get("children", []): d = item["data"] results.append(Deal({ "title": d.get("title", ""), "body": f"score {d.get('score',0)} · {d.get('num_comments',0)} comments", "url": f"https://reddit.com{d.get('permalink','')}", "source": f"r/{sub}", "fetched": datetime.datetime.utcnow().isoformat(), "tags": [], })) return results
 
-async def scrape_html(entry, client): html = await fetch_html(entry['url'], client) soup = BeautifulSoup(html, "lxml") out = [] for b in soup.select(entry['selector']): title = (b.get('alt') or b.get_text() or entry['name'])[:120] body = " ".join(b.stripped_strings)[:200] link = entry['url'] a = b.select_one('a[href]') if a: link = a['href'] out.append(Deal({ "title": title, "body": body, "url": link, "source": entry['name'], "fetched": datetime.datetime.utcnow().isoformat(), "tags": entry.get('tags', []), "min_hot": entry.get('min_hot_score', CONF.get('global_min_hot',0.3)), "ttl_days": entry.get('ttl_days', CONF.get('ttl_default_days',30)), "needs_js": entry.get('needs_js', False), })) return out
+async def scrape_html(entry, client): html = await fetch_html(entry['url'], client) soup = BeautifulSoup(html, "lxml") deals = [] for elem in soup.select(entry['selector']): title = (elem.get('alt') or elem.get_text() or entry['name'])[:120] body = " ".join(elem.stripped_strings)[:200] link = entry['url'] anchor = elem.select_one('a[href]') if anchor: link = anchor['href'] deals.append(Deal({ "title": title, "body": body, "url": link, "source": entry['name'], "fetched": datetime.datetime.utcnow().isoformat(), "tags": entry.get('tags', []), "min_hot": entry.get('min_hot_score', CONF.get('global_min_hot', 0.3)), "ttl_days": entry.get('ttl_days', CONF.get('ttl_default_days', 30)), "needs_js": entry.get('needs_js', False), })) return deals
 
-async def scrape_rss(entry): fp = feedparser.parse(entry['url']) out = [] for e in fp.entries[:20]: out.append(Deal({ "title": e.get('title','')[:120], "body": e.get('summary','')[:200], "url": e.get('link',''), "source": entry['name'], "fetched": datetime.datetime.utcnow().isoformat(), "tags": entry.get('tags', []), "min_hot": entry.get('min_hot_score', CONF.get('global_min_hot',0.3)), "ttl_days": entry.get('ttl_days', CONF.get('ttl_default_days',30)), })) return out
+async def scrape_rss(entry): feed = feedparser.parse(entry['url']) deals = [] for e in feed.entries[:20]: deals.append(Deal({ "title": e.get('title','')[:120], "body": e.get('summary','')[:200], "url": e.get('link',''), "source": entry['name'], "fetched": datetime.datetime.utcnow().isoformat(), "tags": entry.get('tags', []), "min_hot": entry.get('min_hot_score', CONF.get('global_min_hot',0.3)), "ttl_days": entry.get('ttl_days', CONF.get('ttl_default_days',30)), })) return deals
 
-────────────────── HOT & DEDUPE LOGIC ─────────────────────
+SCORING & DEDUPLICATION
 
-def score_pct(text): m = re.search(r"(\d{1,3})%", text) return int(m.group(1))/100 if m else 0
+def score_pct(text): match = re.search(r"(\d{1,3})%", text) return int(match.group(1))/100 if match else 0
 
-def hot_score(deal): return max(score_pct(deal['title'] + deal['body']), deal.get('min_hot', CONF.get('global_min_hot',0.3)))
+def hot_score(deal): base = score_pct(deal['title'] + deal['body']) return max(base, deal.get('min_hot', CONF.get('global_min_hot',0.3)))
 
 def make_sig(deal): return re.sub(r"\W+", "", deal['title'].lower())[:80]
 
-def fuzzy_seen(conn, title): rows = conn.execute("SELECT sig FROM seen").fetchall() return any(token_set_ratio(r[0], title)>90 for r in rows)
+def fuzzy_seen(conn, title): rows = conn.execute("SELECT sig FROM seen").fetchall() return any(token_set_ratio(r[0], title) > 90 for r in rows)
 
-─────────────────── DISCORD POST & LOG ───────────────────
+DISCORD POST
 
-def post_embed(embed, errors): import requests if errors: count = sum(len(es) for es in errors.values()) details = [f"[{src}] {e}" for src,es in errors.items() for e in es] spoiler = "||\n" + "\n".join(details) + "\n||" embed['fields'].append({'name': f"Errors ({count})", 'value': spoiler, 'inline': False}) else: embed['fields'].append({'name': 'Errors', 'value': 'No errors', 'inline': False}) for url in WEBHOOKS: requests.post(url, json=embed, timeout=15)
+def post_embed(embed, errors): import requests if errors: total = sum(len(e) for e in errors.values()) details = [f"[{src}] {msg}" for src, errs in errors.items() for msg in errs] spoiler = "||\n" + "\n".join(details) + "\n||" embed['fields'].append({'name': f"Errors ({total})", 'value': spoiler, 'inline': False}) else: embed['fields'].append({'name': 'Errors', 'value': 'No errors', 'inline': False}) for hook in WEBHOOKS: requests.post(hook, json=embed, timeout=15)
 
-────────────────────── MAIN ───────────────────────────────
+MAIN ENTRYPOINT
 
-async def main(): args = parse_args() now = datetime.datetime.utcnow() tasks, sources = [], []
+async def main(): args = parse_args() now = datetime.datetime.utcnow()
 
+tasks, sources = [], []
 async with httpx.AsyncClient(timeout=20) as client:
-    for e in CONF.get('html', []):
-        if args.source and args.source != e['name']: continue
-        if e.get('needs_js'): continue
-        tasks.append(scrape_html(e, client)); sources.append(e['name'])
-    for e in CONF.get('rss', []):
-        if args.source and args.source != e['name']: continue
-        tasks.append(scrape_rss(e)); sources.append(e['name'])
+    for entry in CONF.get('html', []):
+        if args.source and args.source != entry['name']:
+            continue
+        if entry.get('needs_js'):
+            continue
+        tasks.append(scrape_html(entry, client))
+        sources.append(entry['name'])
+    for entry in CONF.get('rss', []):
+        if args.source and args.source != entry['name']:
+            continue
+        tasks.append(scrape_rss(entry))
+        sources.append(entry['name'])
     for cat in CONF.get('categories', {}).values():
         for sub in cat.get('reddit', []):
-            if args.source and args.source != sub: continue
-            tasks.append(scrape_reddit(sub, client)); sources.append(f"r/{sub}")
+            if args.source and args.source != sub:
+                continue
+            tasks.append(scrape_reddit(sub, client))
+            sources.append(f"r/{sub}")
 
 results = await asyncio.gather(*tasks, return_exceptions=True)
+
 deals, errors = [], {}
-for src, res in zip(sources, results):
-    if isinstance(res, Exception):
-        errors.setdefault(src, []).append(str(res))
+for src, result in zip(sources, results):
+    if isinstance(result, Exception):
+        errors.setdefault(src, []).append(str(result))
     else:
-        deals.extend(res)
+        deals.extend(result)
 
 conn = db_connect()
 fresh = []
-for d in deals:
-    sig = make_sig(d)
+for deal in deals:
+    sig = make_sig(deal)
     row = conn.execute("SELECT posted_at FROM seen WHERE sig=?", (sig,)).fetchone()
     expired = False
     if row:
         dt = datetime.datetime.fromisoformat(row[0])
-        expired = (now - dt).days > d.get('ttl_days', 30)
-    if (not row or expired) and not fuzzy_seen(conn, d['title']) and hot_score(d) >= d.get('min_hot', 0):
-        fresh.append(d)
+        expired = (now - dt).days > deal.get('ttl_days', 30)
+    if (not row or expired) and not fuzzy_seen(conn, deal['title']) and hot_score(deal) >= deal.get('min_hot', 0):
+        fresh.append(deal)
         conn.execute("REPLACE INTO seen VALUES(?,?)", (sig, now.isoformat()))
-conn.commit(); conn.close()
+conn.commit()
+conn.close()
 
 # Write metrics.json
 metrics = {
     "total_scraped": len(deals),
     "fresh_deals": [
-        {"source": d['source'], "title": d['title'], "hot_score": hot_score(d)}
-        for d in fresh
+        {"source": d['source'], "title": d['title'], "hot_score": hot_score(d)} for d in fresh
     ],
     "errors": errors
 }
-with open('metrics.json','w') as mf:
+with open('metrics.json', 'w') as mf:
     json.dump(metrics, mf)
 
+# POSTING
 if not args.dry_run:
     if not fresh:
         embed = {
@@ -112,7 +122,7 @@ if not args.dry_run:
         post_embed(embed, errors)
         return
 
-    fresh_sorted = sorted(fresh, key=lambda d: d['fetched'], reverse=True)
+    sorted_fresh = sorted(fresh, key=lambda x: x['fetched'], reverse=True)
     embed = {
         "title": f"Privacy Deals – {now.strftime('%Y-%m-%d %H:%M UTC')}",
         "fields": []
@@ -120,20 +130,22 @@ if not args.dry_run:
     default_color = CONF.get("colors", {}).get("default")
     if default_color is not None:
         embed["color"] = default_color
-    for d in fresh_sorted[:5]:
+    for d in sorted_fresh[:5]:
         embed['fields'].append({
             'name': d['title'],
-            'value': f"{d['body']}
+            'value': f"{d['body']}\n{d['url']}",
+            'inline': False
+        })
+    post_embed(embed, errors)
+    return
 
-{d['url']}", 'inline': False }) post_embed(embed, errors) return
-
-# Dry-run output
+# DRY-RUN OUTPUT
 for d in fresh:
     print(f"[{d['source']}] {d['title']} – {d['url']}")
 if errors:
     print(f"Errors ({sum(len(es) for es in errors.values())}):")
-    for src, es in errors.items():
-        for e in es:
+    for src, errs in errors.items():
+        for e in errs:
             print(f"  [{src}] {e}")
 else:
     print("_No errors_")
