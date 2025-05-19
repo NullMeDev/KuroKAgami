@@ -47,7 +47,8 @@ jobs:
         run: |
           git config user.name "deal-bot"
           git config user.email "actions@github.com"
-          git add data/deals.sqlite
+          git add data/deals.sqlite 2>/dev/
+          null|| true
           if git diff --cached --quiet; then
             echo "No DB changes"
           else
