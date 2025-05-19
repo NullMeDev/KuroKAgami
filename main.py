@@ -13,11 +13,11 @@ import sqlite3
 import sys
 import logging
 import time
-import requests
 
 import feedparser
 import httpx
 import yaml
+import requests
 
 from bs4 import BeautifulSoup
 from rapidfuzz.fuzz import token_set_ratio
@@ -244,8 +244,7 @@ def post_deals_to_discord(deals, timestamp):
             resp = requests.post(hook, json=payload, timeout=15)
             resp.raise_for_status()
             logger.info(f"Successfully posted to webhook. Response: {resp.status_code}")
-            # Add a small delay between webhook calls
-            time.sleep(1)
+            time.sleep(1)  # Add delay between webhook calls
         except Exception as e:
             logger.error(f"Failed to post to webhook: {str(e)}")
             logger.error(f"Response content: {getattr(resp, 'text', 'No response content')}")
@@ -272,6 +271,7 @@ def post_no_deals_message(timestamp):
             resp = requests.post(hook, json=payload, timeout=15)
             resp.raise_for_status()
             logger.info("Posted no-deals message successfully")
+            time.sleep(1)  # Add delay between webhook calls
         except Exception as e:
             logger.error(f"Failed to post no-deals message: {e}")
 
@@ -286,7 +286,6 @@ def main():
     if not args.dry_run:
         if not verify_webhook_config():
             logger.error("Webhook verification failed! Check your configuration.")
-            # Continue anyway to generate metrics
 
     # Initialize metrics
     metrics = {
