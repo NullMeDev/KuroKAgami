@@ -29,15 +29,34 @@ jobs:
       - name: Create data directory
         run: mkdir -p data
 
-      - name: Verify webhook configuration
+      - name: Test Discord webhook
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
-          if [ -n "$DISCORD_WEBHOOK" ]; then
-            echo "Discord webhook is configured"
-          else
-            echo "WARNING: Discord webhook is not configured"
-          fi
+          python -c "
+          import requests, json
+          webhook_url = '${{ secrets.DISCORD_WEBHOOK }}'
+          if not webhook_url:
+              print('No webhook URL configured!')
+              exit(1)
+          print(f'Testing webhook: {webhook_url[:20]}...')
+          response = requests.post(
+              webhook_url,
+              json={
+                  'content': 'Test message from GitHub Actions',
+                  'embeds': [{
+                      'title': 'Webhook Test',
+                      'description': 'Testing webhook configuration',
+                      'color': 5814783
+                  }]
+              }
+          )
+          print(f'Response status: {response.status_code}')
+          if response.status_code != 204:
+              print(f'Error response: {response.text}')
+              exit(1)
+          print('Webhook test successful!')
+          "
 
       - name: Scrape & post deals
         env:
