@@ -29,34 +29,11 @@ jobs:
       - name: Create data directory
         run: mkdir -p data
 
-      - name: Test Discord webhook
+      - name: Test RSS Feed
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
-          python -c "
-          import requests, json
-          webhook_url = '${{ secrets.DISCORD_WEBHOOK }}'
-          if not webhook_url:
-              print('No webhook URL configured!')
-              exit(1)
-          print(f'Testing webhook: {webhook_url[:20]}...')
-          response = requests.post(
-              webhook_url,
-              json={
-                  'content': 'Test message from GitHub Actions',
-                  'embeds': [{
-                      'title': 'Webhook Test',
-                      'description': 'Testing webhook configuration',
-                      'color': 5814783
-                  }]
-              }
-          )
-          print(f'Response status: {response.status_code}')
-          if response.status_code != 204:
-              print(f'Error response: {response.text}')
-              exit(1)
-          print('Webhook test successful!')
-          "
+          python main.py --force rss --test-rss
 
       - name: Scrape & post deals
         env:
@@ -82,12 +59,12 @@ jobs:
               }
               
               const metrics = JSON.parse(fs.readFileSync('metrics.json'));
-              if (!metrics.fresh_deals.length) {
+              if (!metrics.fresh_deals.length && !metrics.rss_updates.length) {
                 await github.rest.issues.create({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  title: `No fresh deals found`,
-                  body: `The scraper ran at ${metrics.timestamp} but found no fresh deals.`
+                  title: `No updates found`,
+                  body: `The scraper ran at ${metrics.timestamp} but found no fresh deals or RSS updates.`
                 });
               }
             } catch (error) {
