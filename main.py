@@ -1,12 +1,7 @@
+# main.py
 #!/usr/bin/env python3
 """
-Enhanced Privacy- & Tech-Deal Scraper with JSON metrics output
-- Scheduled RSS/HTML/Reddit per config.refresh_times
-- Per-source TTL, hot thresholds, JS fallback flags, tags
-- CLI dry-run & source filtering
-- Category grouping multi-embed support
-- Error capture with clickable Discord spoiler logs
-- Writes metrics.json with valid JSON for downstream steps
+Enhanced Privacy- & Tech-Deal Scraper with JSON metrics, color embeds, and fallback
 """
 import argparse
 import asyncio
@@ -15,7 +10,6 @@ import json
 import os
 import re
 import sqlite3
-import sys
 
 import feedparser
 import httpx
@@ -28,13 +22,10 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 ROOT = os.path.dirname(__file__)
 CONF = yaml.safe_load(open(os.path.join(ROOT, "config/sources.yaml")))
 DB_PATH = os.path.join(ROOT, "data/deals.sqlite")
-
 WEBHOOKS = [w.strip() for w in os.getenv("DISCORD_WEBHOOKS", "").split(",") if w.strip()]
 
-# util
 class Deal(dict):
-    """Deal: {title, body, url, source, fetched, tags:list[str]}"""
-    pass
+    """Hold deal data"""
 
 # ─────────────────── ARGPARSE CLI ─────────────────────────
 def parse_args():
@@ -71,7 +62,7 @@ async def scrape_reddit(sub, client):
         d = post["data"]
         out.append(Deal({
             "title": d.get("title",""),
-            "body": f"score {d.get('score', 0)} · {d.get('num_comments', 0)} comments",
+            "body": f"score {d.get('score',0)} · {d.get('num_comments',0)} comments",
             "url": f"https://reddit.com{d.get('permalink','')}",
             "source": f"r/{sub}",
             "fetched": datetime.datetime.utcnow().isoformat(),
@@ -97,8 +88,8 @@ async def scrape_html(entry, client):
             "source": entry['name'],
             "fetched": datetime.datetime.utcnow().isoformat(),
             "tags": entry.get('tags', []),
-            "min_hot": entry.get('min_hot_score', CONF.get('global_min_hot', 0.3)),
-            "ttl_days": entry.get('ttl_days', CONF.get('ttl_default_days', 30)),
+            "min_hot": entry.get('min_hot_score', CONF.get('global_min_hot',0.3)),
+            "ttl_days": entry.get('ttl_days', CONF.get('ttl_default_days',30)),
             "needs_js": entry.get('needs_js', False),
         }))
     return out
@@ -125,8 +116,7 @@ def score_pct(text):
     return int(m.group(1))/100 if m else 0
 
 def hot_score(deal):
-    base = score_pct(deal['title'] + deal['body'])
-    return max(base, deal.get('min_hot', CONF.get('global_min_hot',0.3)))
+    return max(score_pct(deal['title'] + deal['body']), deal.get('min_hot', CONF.get('global_min_hot',0.3)))
 
 def make_sig(deal):
     return re.sub(r"\W+", "", deal['title'].lower())[:80]
@@ -140,22 +130,11 @@ def post_embed(embed, errors):
     import requests
     if errors:
         count = sum(len(es) for es in errors.values())
-        details = []
-        for src, es in errors.items():
-            for e in es:
-                details.append(f"[{src}] {e}")
+        details = [f"[{src}] {e}" for src,es in errors.items() for e in es]
         spoiler = "||\n" + "\n".join(details) + "\n||"
-        embed['fields'].append({
-            'name': f"Errors ({count})",
-            'value': spoiler,
-            'inline': False
-        })
+        embed['fields'].append({'name': f"Errors ({count})", 'value': spoiler, 'inline': False})
     else:
-        embed['fields'].append({
-            'name': 'Errors',
-            'value': '_No errors_',
-            'inline': False
-        })
+        embed['fields'].append({'name': 'Errors', 'value': '_No errors_', 'inline': False})
     for url in WEBHOOKS:
         requests.post(url, json=embed, timeout=15)
 
@@ -163,33 +142,23 @@ def post_embed(embed, errors):
 async def main():
     args = parse_args()
     now = datetime.datetime.utcnow()
-    tasks = []
-    sources = []
+    tasks, sources = [], []
 
     async with httpx.AsyncClient(timeout=20) as client:
         for e in CONF.get('html', []):
-            if args.source and args.source != e['name']:
-                continue
-            if e.get('needs_js'):
-                continue
-            tasks.append(scrape_html(e, client))
-            sources.append(e['name'])
+            if args.source and args.source != e['name']: continue
+            if e.get('needs_js'): continue
+            tasks.append(scrape_html(e, client)); sources.append(e['name'])
         for e in CONF.get('rss', []):
-            if args.source and args.source != e['name']:
-                continue
-            tasks.append(scrape_rss(e))
-            sources.append(e['name'])
+            if args.source and args.source != e['name']: continue
+            tasks.append(scrape_rss(e)); sources.append(e['name'])
         for cat in CONF.get('categories', {}).values():
             for sub in cat.get('reddit', []):
-                if args.source and args.source != sub:
-                    continue
-                tasks.append(scrape_reddit(sub, client))
-                sources.append(f"r/{sub}")
+                if args.source and args.source != sub: continue
+                tasks.append(scrape_reddit(sub, client)); sources.append(f"r/{sub}")
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    deals = []
-    errors = {}
+    deals, errors = [], {}
     for src, res in zip(sources, results):
         if isinstance(res, Exception):
             errors.setdefault(src, []).append(str(res))
@@ -208,10 +177,9 @@ async def main():
         if (not row or expired) and not fuzzy_seen(conn, d['title']) and hot_score(d) >= d.get('min_hot', 0):
             fresh.append(d)
             conn.execute("REPLACE INTO seen VALUES(?,?)", (sig, now.isoformat()))
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
 
-    # Write metrics.json for workflow
+    # Write metrics.json
     metrics = {
         "total_scraped": len(deals),
         "fresh_deals": [
@@ -220,34 +188,53 @@ async def main():
         ],
         "errors": errors
     }
-    with open('metrics.json', 'w') as mf:
+    with open('metrics.json','w') as mf:
         json.dump(metrics, mf)
 
+    # ── Posting logic ─────────────────────────────────────
     if not args.dry_run:
-        for cat, spec in CONF.get('categories', {}).items():
-            cat_deals = [d for d in fresh if cat in d.get('tags', [])]
-            if cat_deals:
-                embed = {
-                    "title": f"{cat.replace('_', ' ').title()} Deals – {now.strftime('%Y-%m-%d %H:%M UTC')}",
-                    "fields": []
-                }
-                for d in cat_deals[:10]:
-                    embed['fields'].append({
-                        'name': d['title'],
-                        'value': f"{d['body']}\n{d['url']}",
-                        'inline': False
-                    })
-                post_embed(embed, errors)
+        # 1) No deals fallback
+        if not fresh:
+            embed = {
+                "title": "No Waifus For You Weeb 🙅‍♀️",
+                "description": f"Ran at {now.strftime('%Y-%m-%d %H:%M UTC')} but found no fresh deals.",
+                "fields": []
+            }
+            # apply default color
+            default_color = CONF.get("colors", {}).get("default")
+            if default_color is not None:
+                embed["color"] = default_color
+            post_embed(embed, errors)
+            return
+
+        # 2) Top-5 fallback
+        fresh_sorted = sorted(fresh, key=lambda d: d['fetched'], reverse=True)
+        embed = {
+            "title": f"Privacy Deals – {now.strftime('%Y-%m-%d %H:%M UTC')}",
+            "fields": []
+        }
+        default_color = CONF.get("colors", {}).get("default")
+        if default_color is not None:
+            embed["color"] = default_color
+        for d in fresh_sorted[:5]:
+            embed['fields'].append({
+                'name': d['title'],
+                'value': f"{d['body']}\n{d['url']}",
+                'inline': False
+            })
+        post_embed(embed, errors)
+        return
+
+    # ── Dry-run output ─────────────────────────────────────
+    for d in fresh:
+        print(f"[{d['source']}] {d['title']} – {d['url']}")
+    if errors:
+        print(f"Errors ({sum(len(es) for es in errors.values())}):")
+        for src, es in errors.items():
+            for e in es:
+                print(f"  [{src}] {e}")
     else:
-        for d in fresh:
-            print(f"[{d['source']}] {d['title']} – {d['url']}")
-        if errors:
-            print(f"Errors ({sum(len(es) for es in errors.values())}):")
-            for src, es in errors.items():
-                for e in es:
-                    print(f"  [{src}] {e}")
-        else:
-            print("_No errors_")
+        print("_No errors_")
 
 if __name__ == "__main__":
     asyncio.run(main())
