@@ -32,10 +32,21 @@ jobs:
       - name: Run selector tests
         run: pytest -q tests
 
+      - name: Test webhook directly
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          echo "Testing webhook configuration..."
+          curl -H "Content-Type: application/json" \
+               -d '{"content":"Test message from GitHub Actions"}' \
+               $DISCORD_WEBHOOK
+
       - name: Scrape & post deals
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        run: python main.py --force all
+        run: |
+          echo "Webhook configured: ${{ secrets.DISCORD_WEBHOOK != '' }}"
+          python main.py --force all
 
       - name: Alert if no fresh deals
         if: always()  # Run even if previous step fails
