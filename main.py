@@ -53,31 +53,56 @@ class Deal(dict):
     """Hold deal data"""
     pass
 
-def verify_webhook_config():
-    """Verify webhook configuration"""
-    logger.info("Verifying webhook configuration...")
+def validate_webhook_url(url):
+    """Validate Discord webhook URL format"""
+    if not url.startswith('https://discord.com/api/webhooks/'):
+        logger.error(f"Invalid webhook URL format: {url[:20]}...")
+        return False
+    return True
+
+def test_discord_webhook():
+    """Test Discord webhook with a simple message"""
     if not WEBHOOKS:
-        logger.error("No webhooks configured!")
+        logger.error("No webhooks configured for testing!")
         return False
         
     for hook in WEBHOOKS:
+        if not validate_webhook_url(hook):
+            logger.error("Invalid webhook URL detected! Please check your DISCORD_WEBHOOK secret.")
+            return False
+            
         try:
             test_payload = {
-                "content": "Test message - webhook verification",
+                "content": "🔔 Test message from deal scraper",
                 "embeds": [{
                     "title": "Webhook Test",
-                    "description": "This is a test message to verify webhook configuration",
-                    "color": CONF.get("colors", {}).get("default", 0)
+                    "description": "If you see this message, the webhook is working correctly!",
+                    "color": 5814783,  # Light blue
+                    "fields": [
+                        {
+                            "name": "Timestamp",
+                            "value": datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC'),
+                            "inline": True
+                        }
+                    ]
                 }]
             }
             
-            logger.info(f"Testing webhook (first 20 chars): {hook[:20]}...")
-            resp = requests.post(hook, json=test_payload, timeout=15)
-            resp.raise_for_status()
-            logger.info(f"Webhook test successful! Response: {resp.status_code}")
-            return True
+            logger.info(f"Testing Discord webhook: {hook[:20]}...")
+            response = requests.post(hook, json=test_payload)
+            response.raise_for_status()
+            
+            if response.status_code == 204:  # Discord returns 204 on success
+                logger.info("✅ Webhook test successful!")
+                return True
+            else:
+                logger.error(f"❌ Unexpected response code: {response.status_code}")
+                return False
+                
         except Exception as e:
-            logger.error(f"Webhook test failed: {str(e)}")
+            logger.error(f"❌ Webhook test failed: {str(e)}")
+            if hasattr(e, 'response'):
+                logger.error(f"Response content: {e.response.text}")
             return False
 
 def parse_args():
@@ -209,7 +234,7 @@ async def scrape_reddit(sub, client):
     return out
 
 def post_deals_to_discord(deals, timestamp):
-    """Post deals to Discord with better error handling and logging"""
+    """Post deals to Discord with enhanced error handling and logging"""
     if not WEBHOOKS:
         logger.error("No webhooks configured! Please set DISCORD_WEBHOOK in GitHub secrets")
         return
@@ -217,63 +242,70 @@ def post_deals_to_discord(deals, timestamp):
     logger.info(f"Preparing to post {len(deals)} deals to {len(WEBHOOKS)} webhooks")
     
     sf = sorted(deals, key=lambda x: x.get("fetched"), reverse=True)
-    emb = {
-        "title": f"Privacy Deals – {timestamp.strftime('%Y-%m-%d %H:%M UTC')}",
-        "description": f"Found {len(deals)} new deals",
-        "fields": []
+    
+    payload = {
+        "content": "🎯 New Deals Found!",
+        "embeds": [{
+            "title": f"Privacy Deals – {timestamp.strftime('%Y-%m-%d %H:%M UTC')}",
+            "description": f"Found {len(deals)} new deals",
+            "color": CONF.get("colors",{}).get("default", 15844367),
+            "fields": []
+        }]
     }
     
-    col = CONF.get("colors",{}).get("default")
-    if col is not None:
-        emb["color"] = col
-        
     for d in sf[:5]:
         logger.info(f"Adding deal to embed: {d['title']}")
-        emb["fields"].append({
+        payload["embeds"][0]["fields"].append({
             "name": d["title"],
             "value": f"{d.get('body', 'No description')}\n{d['url']}",
             "inline": False
         })
 
-    payload = {"embeds":[emb]}
     logger.info(f"Payload prepared: {json.dumps(payload, indent=2)}")
     
     for hook in WEBHOOKS:
         try:
-            logger.info(f"Attempting to post to webhook (first 20 chars): {hook[:20]}...")
-            resp = requests.post(hook, json=payload, timeout=15)
-            resp.raise_for_status()
-            logger.info(f"Successfully posted to webhook. Response: {resp.status_code}")
+            logger.info(f"Posting to webhook (first 20 chars): {hook[:20]}...")
+            response = requests.post(hook, json=payload)
+            
+            if response.status_code == 204:
+                logger.info("✅ Successfully posted to webhook")
+            else:
+                logger.error(f"❌ Unexpected response code: {response.status_code}")
+                logger.error(f"Response content: {response.text}")
+            
             time.sleep(1)  # Add delay between webhook calls
+            
         except Exception as e:
-            logger.error(f"Failed to post to webhook: {str(e)}")
-            logger.error(f"Response content: {getattr(resp, 'text', 'No response content')}")
+            logger.error(f"❌ Failed to post to webhook: {str(e)}")
+            if hasattr(e, 'response'):
+                logger.error(f"Response content: {e.response.text}")
 
 def post_no_deals_message(timestamp):
     """Post a message when no deals are found"""
     if not WEBHOOKS:
         return
         
-    emb = {
-        "title": "No New Deals Found",
-        "description": f"Ran at {timestamp.strftime('%Y-%m-%d %H:%M UTC')} but found no fresh deals.",
-        "fields": []
+    payload = {
+        "content": "📢 Scraper Update",
+        "embeds": [{
+            "title": "No New Deals Found",
+            "description": f"Ran at {timestamp.strftime('%Y-%m-%d %H:%M UTC')} but found no fresh deals.",
+            "color": CONF.get("colors",{}).get("default", 15844367),
+            "fields": []
+        }]
     }
-    
-    col = CONF.get("colors",{}).get("default")
-    if col is not None:
-        emb["color"] = col
-        
-    payload = {"embeds":[emb]}
     
     for hook in WEBHOOKS:
         try:
-            resp = requests.post(hook, json=payload, timeout=15)
-            resp.raise_for_status()
-            logger.info("Posted no-deals message successfully")
-            time.sleep(1)  # Add delay between webhook calls
+            response = requests.post(hook, json=payload)
+            if response.status_code == 204:
+                logger.info("✅ Posted no-deals message successfully")
+            else:
+                logger.error(f"❌ Failed to post no-deals message: {response.status_code}")
+            time.sleep(1)
         except Exception as e:
-            logger.error(f"Failed to post no-deals message: {e}")
+            logger.error(f"❌ Failed to post no-deals message: {e}")
 
 def main():
     args = parse_args()
@@ -282,10 +314,13 @@ def main():
     logger.info("Starting scraper run")
     logger.info(f"Webhooks configured: {WEBHOOKS}")
     
-    # Verify webhook configuration
+    # Test Discord webhook first
     if not args.dry_run:
-        if not verify_webhook_config():
-            logger.error("Webhook verification failed! Check your configuration.")
+        logger.info("Testing Discord webhook...")
+        if not test_discord_webhook():
+            logger.error("Discord webhook test failed! Check your webhook URL and permissions.")
+            if not args.force:  # Continue only if --force is specified
+                return
 
     # Initialize metrics
     metrics = {
