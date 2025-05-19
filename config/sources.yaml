@@ -1,4 +1,20 @@
-version: 1.1.0
+# config/sources.yaml
+version: 1.2.0
+
+# Optional embed colors (Discord decimal RGB)
+colors:
+  default:       15844367   # light purple
+  vpn:            3447003   # dark blue
+  cloud_storage: 15844367   # light purple
+  secure_email:   8311585   # teal
+  proxy:         16776960   # yellow
+  notes:         1146986    # green
+  ai_tools:      16711935   # magenta
+  dev_tools:      3066993   # blue-green
+  certification:15105570   # orange
+  learning:      8636777    # indigo
+  security_labs:10038562   # red-brown
+
 reddit:
   - vpndeals
   - vpncoupons
@@ -24,17 +40,172 @@ html:
   - name: GrabOn VPN
     url: https://www.grabon.in/vpn-coupons/
     selector: .offer-box
-    tags: [vpn]
-    min_hot_score: 0.5
-    ttl_days: 7
-  # ... other html entries truncated for brevity ...
+
+  - name: WinningPC pCloud
+    url: https://winningpc.com/pcloud-premium-giveaway-promo-codes/
+    selector: h2
+
+  - name: ProtonMail coupons
+    url: https://protonmail.worthepenny.com/coupon/
+    selector: tr
+
+  - name: VPNMentor coupons
+    url: https://www.vpnmentor.com/blog/vpn-coupons/
+    selector: article .offer
+
+  - name: Internxt coupons
+    url: https://internxt.com/coupons/
+    selector: .coupon-card
+
+  - name: Tresorit coupons
+    url: https://tresorit.com/coupons/
+    selector: table tr
+
+  - name: Smartproxy coupons
+    url: https://www.smartproxy.com/coupons/
+    selector: .coupon-container
+
+  - name: Sync.com promos
+    url: https://www.sync.com/coupons/
+    selector: .promo-item
+
+  - name: Standard Notes promos
+    url: https://standardnotes.com/promotions
+    selector: .promo-card
+
+  - name: TechBargains software deals
+    url: https://www.techbargains.com/software/
+    selector: .deal
+
+  - name: Slickdeals encryption tag
+    url: https://slickdeals.net/tag/encryption/
+    selector: .fpGridBox
+
+  - name: DealNews Email deals
+    url: https://www.dealnews.com/Email-Services/
+    selector: .dealItem
+
+  - name: ProxyMesh promotions
+    url: https://proxymesh.com/promotions/
+    selector: .promoBox
+
+  - name: AppSumo Lifetime Deals
+    url: https://appsumo.com/lifetime-deals/
+    selector: .deal-card
+
+  - name: StackSocial Coupons
+    url: https://stacksocial.com/?filter=coupon
+    selector: .product-tile
+
+  - name: Humble Bundle Software
+    url: https://www.humblebundle.com/software
+    selector: .product-tile
+
+  - name: BitsDuJour Software Sales
+    url: https://www.bitsdujour.com/software-deals
+    selector: .deal-listing
+
+  - name: DealClub Tech Deals
+    url: https://www.dealclub.com/deals/tech-gadgets
+    selector: .deal-item
+
+  - name: Woot Tech Deals
+    url: https://www.woot.com/deals/technology
+    selector: .pb-container
+
+  - name: Newegg Shell Shocker
+    url: https://www.newegg.com/shell-shocker
+    selector: .item-container
+
+  - name: Amazon Gold Box (Software)
+    url: https://www.amazon.com/software/b?ie=UTF8&node=229507
+    selector: .a-fixed-left-grid-inner
+
+  - name: NordVPN deals
+    url: https://nordvpn.com/coupons/
+    selector: .coupon
+
+  - name: Surfshark offers
+    url: https://surfshark.com/offers
+    selector: .offer-box
+
+  - name: CyberGhost promotions
+    url: https://www.cyberghostvpn.com/en_US/vpn-offers
+    selector: .vpn-offer-card
+
+  - name: ExpressVPN deals
+    url: https://www.expressvpn.com/deals
+    selector: .deal-item
+
+  - name: ProtonVPN plans
+    url: https://protonvpn.com/pricing
+    selector: .plan-card
+
+  - name: Windscribe offers
+    url: https://windscribe.com/offers
+    selector: .offer-card
+
+  - name: Mullvad deals
+    url: https://mullvad.net/en/offers/
+    selector: .offer
+
+  - name: PIA (Private Internet Access)
+    url: https://www.privateinternetaccess.com/pages/buyvpn
+    selector: .plan
+
+  - name: Icedrive coupons
+    url: https://www.icedrive.net/coupons/
+    selector: .coupon
+
+  - name: Tutanota pricing
+    url: https://tutanota.com/pricing
+    selector: .pricing-tier
+
 rss:
   - name: Hugging Face RSS
     url: https://huggingface.co/feed
     selector: entry
-    tags: [ai_tools]
-# ... other rss entries truncated ...
-categories:
-  vpn:
-    reddit: [vpndeals, vpncoupons]
-    html: [GrabOn VPN]
+
+  - name: PaperswithCode RSS
+    url: https://paperswithcode.com/rss
+    selector: item
+
+  - name: Arxiv cs.CL RSS
+    url: https://export.arxiv.org/rss/cs.CL
+    selector: item
+
+  - name: Product Hunt AI RSS
+    url: https://www.producthunt.com/feed/topic/ai
+    selector: item
+
+  - name: AWS Educate RSS
+    url: https://aws.amazon.com/education/awseducate/feed/
+    selector: item
+
+  - name: Azure for Students RSS
+    url: https://azure.microsoft.com/en-us/services/rss/
+    selector: item
+
+  - name: GCP Academic Grants RSS
+    url: https://cloud.google.com/blog/topics/education/rss/
+    selector: item
+
+  - name: Udemy Featured RSS
+    url: https://www.udemy.com/rss/featured/
+    selector: item
+
+  - name: Educative Coupons RSS
+    url: https://www.educative.io/blog/rss
+    selector: item
+
+  - name: Pluralsight Free Weekend RSS
+    url: https://www.pluralsight.com/blog/feed
+    selector: item
+
+  - name: TryHackMe RSS
+    url: https://tryhackme.com/feed
+    selector: item
+
+  - name: HackTheBox University RSS
+    url: https://www.hackthebox.com/feeds/university
+    selector: item
