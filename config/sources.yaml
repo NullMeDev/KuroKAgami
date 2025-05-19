@@ -1,5 +1,3 @@
-# config/sources.yaml
-
 version: 1.2.0
 
 # Optional embed colors (Discord decimal RGB)
@@ -16,61 +14,53 @@ colors:
   learning:       8636777   # indigo
   security_labs: 10038562   # red-brown
 
-reddit:
-  - vpndeals
-  - vpncoupons
-  - PrivacyDeals
-  - softwaresale
-  - Promocode
-  - CouponCodes
-  - SoftwareDeals
-  - Freebies
-  - Deals
-  - BlackFridayDeals
-  - Giveaways
-  - FreeApps
-  - ProductivityDeals
-  - CyberDeals
-  - PrivacyToolsIO
-  - SecuritySoftware
-  - EncryptionDeals
-  - Proxies
-  - CloudStorageDeals
+# Global settings
+global_min_hot: 0.1  # Reduced threshold for testing
+ttl_default_days: 30
 
+# RSS Feeds - removed selectors as they're not needed
+rss:
+  - name: "Arxiv CS Updates"
+    url: "https://export.arxiv.org/rss/cs.CL"
+    tags: ["ai", "research"]
+    min_hot_score: 0.1
+
+  - name: "Papers with Code"
+    url: "https://paperswithcode.com/rss"
+    tags: ["ai", "code"]
+    min_hot_score: 0.1
+
+# HTML sources remain the same
 html:
   - name: GrabOn VPN
     url: https://www.grabon.in/vpn-coupons/
     selector: .offer-box
+    tags: ["vpn"]
 
   - name: WinningPC pCloud
     url: https://winningpc.com/pcloud-premium-giveaway-promo-codes/
     selector: h2
+    tags: ["cloud"]
 
-  - name: ProtonMail coupons
-    url: https://protonmail.worthepenny.com/coupon/
-    selector: tr
+  # Add other HTML sources as needed...
 
-  - name: VPNMentor coupons
-    url: https://www.vpnmentor.com/blog/vpn-coupons/
-    selector: article .offer
+# Categories for Reddit
+categories:
+  privacy:
+    reddit:
+      - vpndeals
+      - PrivacyDeals
+      - PrivacyToolsIO
+  
+  software:
+    reddit:
+      - softwaresale
+      - SoftwareDeals
+      - FreeApps
+      - ProductivityDeals
 
-  - name: Internxt coupons
-    url: https://internxt.com/coupons/
-    selector: .coupon-card
-
-  # …and all your other html sources, each entry indented exactly like above…
-
-rss:
-  - name: Hugging Face RSS
-    url: https://huggingface.co/feed
-    selector: entry
-
-  - name: PaperswithCode RSS
-    url: https://paperswithcode.com/rss
-    selector: item
-
-  - name: Arxiv cs.CL RSS
-    url: https://export.arxiv.org/rss/cs.CL
-    selector: item
-
-  # …and all your other rss sources…
+  deals:
+    reddit:
+      - Deals
+      - BlackFridayDeals
+      - CyberDeals
