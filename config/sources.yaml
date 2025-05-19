@@ -1,1 +1,40 @@
+version: 1.1.0
+reddit:
+  - vpndeals
+  - vpncoupons
+  - PrivacyDeals
+  - softwaresale
+  - Promocode
+  - CouponCodes
+  - SoftwareDeals
+  - Freebies
+  - Deals
+  - BlackFridayDeals
+  - Giveaways
+  - FreeApps
+  - ProductivityDeals
+  - CyberDeals
+  - PrivacyToolsIO
+  - SecuritySoftware
+  - EncryptionDeals
+  - Proxies
+  - CloudStorageDeals
 
+html:
+  - name: GrabOn VPN
+    url: https://www.grabon.in/vpn-coupons/
+    selector: .offer-box
+    tags: [vpn]
+    min_hot_score: 0.5
+    ttl_days: 7
+  # ... other html entries truncated for brevity ...
+rss:
+  - name: Hugging Face RSS
+    url: https://huggingface.co/feed
+    selector: entry
+    tags: [ai_tools]
+# ... other rss entries truncated ...
+categories:
+  vpn:
+    reddit: [vpndeals, vpncoupons]
+    html: [GrabOn VPN]
