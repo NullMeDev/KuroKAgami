@@ -43,8 +43,8 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: python main.py --force all > metrics.json
 
-      - name: Skip cache comit 
-      run: echo "Cache-comit step disabled to avoid errors"
+      - name: Skip cache commit 
+        run: echo "Cache-commit step disabled to avoid errors"
 
       - name: Alert if no fresh deals
         if: success()
