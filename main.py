@@ -215,7 +215,7 @@ async def main():
     metrics = {
         "total_scraped": len(deals),
         "fresh_deals": [
-            {"source": d['source'], "title": d['title'], "hot_score': hot_score(d)}
+            {"source": d['source'], "title": d['title'], "hot_score": hot_score(d)}
             for d in fresh
         ],
         "errors": errors
