@@ -43,18 +43,8 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: python main.py --force all > metrics.json
 
-      - name: Commit updated cache
-        run: |
-          git config user.name "deal-bot"
-          git config user.email "actions@github.com"
-          git add data/deals.sqlite 2>/dev/
-          null|| true
-          if git diff --cached --quiet; then
-            echo "No DB changes"
-          else
-            git commit -m "chore(cache): update deal history [skip ci]"
-            git push
-          fi
+      - name: Skip cache comit 
+      run: echo "Cache-comit step disabled to avoid errors"
 
       - name: Alert if no fresh deals
         if: success()
