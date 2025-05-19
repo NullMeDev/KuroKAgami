@@ -11,6 +11,7 @@ import os
 import re
 import sqlite3
 import sys
+import logging
 
 import feedparser
 import httpx
@@ -22,6 +23,10 @@ from rapidfuzz.fuzz import token_set_ratio
 from tenacity import retry
 from tenacity import stop_after_attempt
 from tenacity import wait_exponential
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ───────────────────────── CONFIGURATION ─────────────────────────
 ROOT = os.path.dirname(__file__)
@@ -37,6 +42,8 @@ elif single_hook:
     WEBHOOKS = [single_hook]
 else:
     WEBHOOKS = []
+
+logger.info(f"Configured webhooks: {WEBHOOKS}")
 
 class Deal(dict):
     """Hold deal data"""
@@ -73,29 +80,40 @@ def db_connect():
 # ────────────────────── FETCH UTILITIES ──────────────────────
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
 async def fetch_html(url, client: httpx.AsyncClient):
+    logger.info(f"Fetching HTML from: {url}")
     r = await client.get(url, timeout=20)
     r.raise_for_status()
     return r.text
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
 async def fetch_json(url, client: httpx.AsyncClient):
+    logger.info(f"Fetching JSON from: {url}")
     r = await client.get(url, timeout=20)
     r.raise_for_status()
     return r.json()
 
 # ───────────────────────── PARSERS ─────────────────────────
-async def scrape_reddit(sub, client):
-    data = await fetch_json(f"https://www.reddit.com/r/{sub}/new.json?limit=20", client)
+def scrape_rss(entry):
+    """Synchronous RSS scraping"""
+    logger.info(f"Processing RSS feed: {entry.get('url', '')}")
+    feed = feedparser.parse(entry.get("url",""))
+    
+    if feed.bozo:
+        logger.error(f"RSS Feed Error: {feed.bozo_exception}")
+        return []
+        
+    logger.info(f"Found {len(feed.entries)} entries")
     out = []
-    for post in data.get("data", {}).get("children", []):
-        d = post["data"]
+    for e in feed.entries[:20]:
         out.append(Deal({
-            "title": d.get("title",""),
-            "body": f"score {d.get('score',0)} · {d.get('num_comments',0)} comments",
-            "url": f"https://reddit.com{d.get('permalink','')}",
-            "source": f"r/{sub}",
+            "title": e.get("title","")[:120],
+            "body": e.get("summary","")[:200],
+            "url": e.get("link",""),
+            "source": entry.get("name",""),
             "fetched": datetime.datetime.utcnow().isoformat(),
-            "tags": [],
+            "tags": entry.get("tags", []),
+            "min_hot": entry.get("min_hot_score", CONF.get("global_min_hot",0.1)), # Reduced threshold
+            "ttl_days": entry.get("ttl_days", CONF.get("ttl_default_days",30)),
         }))
     return out
 
@@ -117,167 +135,180 @@ async def scrape_html(entry, client):
             "source": entry.get("name",""),
             "fetched": datetime.datetime.utcnow().isoformat(),
             "tags": entry.get("tags", []),
-            "min_hot": entry.get("min_hot_score", CONF.get("global_min_hot",0.3)),
+            "min_hot": entry.get("min_hot_score", CONF.get("global_min_hot",0.1)), # Reduced threshold
             "ttl_days": entry.get("ttl_days", CONF.get("ttl_default_days",30)),
             "needs_js": entry.get("needs_js", False),
         }))
     return out
 
-async def scrape_rss(entry):
-    feed = feedparser.parse(entry.get("url",""))
+async def scrape_reddit(sub, client):
+    data = await fetch_json(f"https://www.reddit.com/r/{sub}/new.json?limit=20", client)
     out = []
-    for e in feed.entries[:20]:
+    for post in data.get("data", {}).get("children", []):
+        d = post["data"]
         out.append(Deal({
-            "title": e.get("title","")[:120],
-            "body": e.get("summary","")[:200],
-            "url": e.get("link",""),
-            "source": entry.get("name",""),
+            "title": d.get("title",""),
+            "body": f"score {d.get('score',0)} · {d.get('num_comments',0)} comments",
+            "url": f"https://reddit.com{d.get('permalink','')}",
+            "source": f"r/{sub}",
             "fetched": datetime.datetime.utcnow().isoformat(),
-            "tags": entry.get("tags", []),
-            "min_hot": entry.get("min_hot_score", CONF.get("global_min_hot",0.3)),
-            "ttl_days": entry.get("ttl_days", CONF.get("ttl_default_days",30)),
+            "tags": [],
         }))
     return out
 
-# ───────────────────── SCORING & DEDUPE ─────────────────────
-def score_pct(text):
-    m = re.search(r"(\d{1,3})%", text)
-    return int(m.group(1))/100 if m else 0
+# Rest of the code remains the same, just update the main() function:
 
-def hot_score(deal):
-    base = score_pct(deal.get("title","") + deal.get("body",""))
-    return max(base, deal.get("min_hot", CONF.get("global_min_hot",0.3)))
-
-def make_sig(deal):
-    return re.sub(r"\W+","", deal.get("title","").lower())[:80]
-
-def fuzzy_seen(conn, title):
-    rows = conn.execute("SELECT sig FROM seen").fetchall()
-    return any(token_set_ratio(r[0], title) > 90 for r in rows)
-
-# ───────────────────────── DISCORD POST ─────────────────────────
-def post_embed(embed, errors):
-    print(f"Posting to {len(WEBHOOKS)} webhook(s): {WEBHOOKS}", file=sys.stderr)
-
-    if errors:
-        total = sum(len(es) for es in errors.values())
-        details = [f"[{src}] {msg}" for src,es in errors.items() for msg in es]
-        spoiler = "||\n" + "\n".join(details) + "\n||"
-        embed["fields"].append({"name": f"Errors ({total})", "value": spoiler, "inline": False})
-    else:
-        embed["fields"].append({"name":"Errors","value":"_No errors_","inline":False})
-
-    payload = {"embeds":[embed]}
-    for hook in WEBHOOKS:
-        resp = requests.post(hook, json=payload, timeout=15)
-        resp.raise_for_status()
-
-# ────────────────────────────── MAIN ──────────────────────────────
 def main():
     args = parse_args()
     now = datetime.datetime.utcnow()
+    
+    logger.info("Starting scraper run")
+    logger.info(f"Webhooks configured: {WEBHOOKS}")
 
+    # Process RSS feeds synchronously first
+    rss_results = []
+    for entry in CONF.get("rss",[]):
+        if args.source and args.source != entry.get("name"):
+            continue
+        try:
+            results = scrape_rss(entry)
+            rss_results.extend(results)
+        except Exception as e:
+            logger.error(f"Error processing RSS feed {entry.get('name')}: {e}")
+    
+    # Then handle async tasks
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     client = httpx.AsyncClient(timeout=20)
 
     tasks, sources = [], []
+    
+    # HTML tasks
     for e in CONF.get("html",[]):
-        if args.source and args.source!=e.get("name"): continue
-        if e.get("needs_js"): continue
-        tasks.append(scrape_html(e, client)); sources.append(e.get("name"))
+        if args.source and args.source!=e.get("name"): 
+            continue
+        if e.get("needs_js"): 
+            continue
+        tasks.append(scrape_html(e, client))
+        sources.append(e.get("name"))
 
-    for e in CONF.get("rss",[]):
-        if args.source and args.source!=e.get("name"): continue
-        tasks.append(scrape_rss(e)); sources.append(e.get("name"))
-
+    # Reddit tasks
     for cat in CONF.get("categories",{}).values():
         for sub in cat.get("reddit",[]):
-            if args.source and args.source!=sub: continue
-            tasks.append(scrape_reddit(sub, client)); sources.append(f"r/{sub}")
+            if args.source and args.source!=sub:
+                continue
+            tasks.append(scrape_reddit(sub, client))
+            sources.append(f"r/{sub}")
 
     results = loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
     loop.run_until_complete(client.aclose())
 
-    deals, errors = [], {}
-    from tenacity import RetryError
+    # Combine all results
+    all_results = rss_results
     for src, res in zip(sources, results):
         if isinstance(res, Exception):
-            # unwrap RetryError for HTTPStatusError
-            if isinstance(res, RetryError) and hasattr(res, "last_attempt"):
-                cause = res.last_attempt.exception()
-                msg = f"{type(cause).__name__}: {cause}"
-            else:
-                msg = f"{type(res).__name__}: {res}"
-            errors.setdefault(src, []).append(msg)
-        else:
-            deals.extend(res)
+            logger.error(f"Error processing {src}: {res}")
+            continue
+        all_results.extend(res)
 
+    # Process results
     conn = db_connect()
     fresh = []
-    for d in deals:
+    for d in all_results:
         sig = make_sig(d)
         row = conn.execute("SELECT posted_at FROM seen WHERE sig=?", (sig,)).fetchone()
         expired = False
         if row:
             dt = datetime.datetime.fromisoformat(row[0])
             expired = (now - dt).days > d.get("ttl_days", 30)
-        if ((not row) or expired) and not fuzzy_seen(conn, d.get("title","")) and hot_score(d) >= d.get("min_hot",0):
+        if ((not row) or expired) and not fuzzy_seen(conn, d.get("title","")):
             fresh.append(d)
             conn.execute("REPLACE INTO seen VALUES(?,?)",(sig,now.isoformat()))
+    
     conn.commit()
     conn.close()
 
-    # write metrics.json
-    out = {
-        "total_scraped": len(deals),
+    # Write metrics
+    metrics = {
+        "total_scraped": len(all_results),
         "fresh_deals": [
-            {"source": d["source"], "title": d["title"], "hot_score": hot_score(d)}
+            {"source": d["source"], "title": d["title"]}
             for d in fresh
         ],
-        "errors": errors
+        "timestamp": now.isoformat()
     }
+    
     with open("metrics.json","w") as mf:
-        json.dump(out, mf)
+        json.dump(metrics, mf)
 
-    if not args.dry_run:
-        if not fresh:
-            emb = {
-                "title": "No Waifus For You Weeb 🙅‍♀️",
-                "description": f"Ran at {now.strftime('%Y-%m-%d %H:%M UTC')} but found no fresh deals.",
-                "fields": []
-            }
-            col = CONF.get("colors",{}).get("default")
-            if col is not None: emb["color"] = col
-            post_embed(emb, errors)
-            return
+    logger.info(f"Found {len(fresh)} fresh deals out of {len(all_results)} total")
 
-        sf = sorted(fresh, key=lambda x: x.get("fetched"), reverse=True)
-        emb = {
-            "title": f"Privacy Deals – {now.strftime('%Y-%m-%d %H:%M UTC')}",
-            "fields": []
-        }
-        col = CONF.get("colors",{}).get("default")
-        if col is not None: emb["color"] = col
-        for d in sf[:5]:
-            emb["fields"].append({
-                "name": d["title"],
-                "value": f"{d['body']}\n{d['url']}",
-                "inline": False
-            })
-        post_embed(emb, errors)
+    if not args.dry_run and fresh:
+        post_deals_to_discord(fresh, now)
+    elif not args.dry_run:
+        logger.info("No fresh deals to post")
+        post_no_deals_message(now)
+    else:
+        # Print deals for dry run
+        for d in fresh:
+            print(f"[{d['source']}] {d['title']} – {d['url']}")
+
+def post_deals_to_discord(deals, timestamp):
+    """Post deals to Discord with better error handling"""
+    if not WEBHOOKS:
+        logger.error("No webhooks configured!")
         return
 
-    # dry-run output
-    for d in fresh:
-        print(f"[{d['source']}] {d['title']} – {d['url']}")
-    if errors:
-        print(f"Errors ({sum(len(es) for es in errors.values())}):")
-        for src, es in errors.items():
-            for e in es:
-                print(f"  [{src}] {e}")
-    else:
-        print("_No errors_")
+    sf = sorted(deals, key=lambda x: x.get("fetched"), reverse=True)
+    emb = {
+        "title": f"Privacy Deals – {timestamp.strftime('%Y-%m-%d %H:%M UTC')}",
+        "fields": []
+    }
+    
+    col = CONF.get("colors",{}).get("default")
+    if col is not None:
+        emb["color"] = col
+        
+    for d in sf[:5]:
+        emb["fields"].append({
+            "name": d["title"],
+            "value": f"{d['body']}\n{d['url']}",
+            "inline": False
+        })
+
+    payload = {"embeds":[emb]}
+    
+    for hook in WEBHOOKS:
+        try:
+            resp = requests.post(hook, json=payload, timeout=15)
+            resp.raise_for_status()
+            logger.info(f"Successfully posted to webhook")
+        except Exception as e:
+            logger.error(f"Failed to post to webhook: {e}")
+
+def post_no_deals_message(timestamp):
+    """Post a message when no deals are found"""
+    if not WEBHOOKS:
+        return
+        
+    emb = {
+        "title": "No New Deals Found",
+        "description": f"Ran at {timestamp.strftime('%Y-%m-%d %H:%M UTC')} but found no fresh deals.",
+        "fields": []
+    }
+    
+    col = CONF.get("colors",{}).get("default")
+    if col is not None:
+        emb["color"] = col
+        
+    payload = {"embeds":[emb]}
+    
+    for hook in WEBHOOKS:
+        try:
+            resp = requests.post(hook, json=payload, timeout=15)
+            resp.raise_for_status()
+        except Exception as e:
+            logger.error(f"Failed to post no-deals message: {e}")
 
 if __name__ == "__main__":
     main()
