@@ -1,6 +1,6 @@
 # Global settings
-global_min_hot: 0.05  # Reduced threshold
-ttl_default_days: 30
+global_min_hot: 0.01  # Lower threshold for RSS
+ttl_default_days: 1   # Check more frequently
 
 # Optional embed colors (Discord decimal RGB)
 colors:
@@ -15,32 +15,37 @@ colors:
   certification: 15105570   # orange
   learning:       8636777   # indigo
   security_labs: 10038562   # red-brown
+  rss_updates:   5793266    # light blue
 
 # RSS Feeds
 rss:
   - name: "Arxiv CS Updates"
     url: "https://export.arxiv.org/rss/cs.CL"
     tags: ["ai", "research"]
-    min_hot_score: 0.05
-    ttl_days: 1  # Check more frequently
+    min_hot_score: 0.01
+    ttl_days: 0.01  # Very short TTL to allow frequent updates
+    description: "Latest Computer Science papers from arXiv"
 
   - name: "Papers with Code"
     url: "https://paperswithcode.com/rss"
     tags: ["ai", "code"]
-    min_hot_score: 0.05
-    ttl_days: 1
+    min_hot_score: 0.01
+    ttl_days: 0.01
+    description: "Latest ML papers with implementations"
 
-# HTML sources
+# HTML sources (deals)
 html:
   - name: GrabOn VPN
     url: https://www.grabon.in/vpn-coupons/
     selector: .offer-box
     tags: ["vpn"]
+    ttl_days: 7  # Only check weekly for deals
 
   - name: WinningPC pCloud
     url: https://winningpc.com/pcloud-premium-giveaway-promo-codes/
     selector: h2
     tags: ["cloud"]
+    ttl_days: 7
 
 # Categories for Reddit
 categories:
