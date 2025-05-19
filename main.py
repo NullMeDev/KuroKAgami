@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 
 import feedparser
 import httpx
@@ -69,246 +70,178 @@ def db_connect():
 # FETCH UTILITIES
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
 async def fetch_html(url, client: httpx.AsyncClient):
-    response = await client.get(url, timeout=20)
-    response.raise_for_status()
-    return response.text
+    r = await client.get(url, timeout=20)
+    r.raise_for_status()
+    return r.text
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
 async def fetch_json(url, client: httpx.AsyncClient):
-    response = await client.get(url, timeout=20)
-    response.raise_for_status()
-    return response.json()
+    r = await client.get(url, timeout=20)
+    r.raise_for_status()
+    return r.json()
 
 # PARSERS
 async def scrape_reddit(sub, client):
-    data = await fetch_json(
-        f"https://www.reddit.com/r/{sub}/new.json?limit=20",
-        client
-    )
-    results = []
-    for item in data.get("data", {}).get("children", []):
-        d = item["data"]
-        results.append(
-            Deal({
-                "title": d.get("title", ""),
-                "body": (
-                    f"score {d.get('score', 0)} · {d.get('num_comments', 0)} comments"
-                ),
-                "url": f"https://reddit.com{d.get('permalink', '')}",
-                "source": f"r/{sub}",
-                "fetched": datetime.datetime.utcnow().isoformat(),
-                "tags": [],
-            })
-        )
-    return results
+    data = await fetch_json(f"https://www.reddit.com/r/{sub}/new.json?limit=20", client)
+    out = []
+    for post in data.get("data", {}).get("children", []):
+        d = post["data"]
+        out.append(Deal({
+            "title": d.get("title",""),
+            "body": f"score {d.get('score',0)} · {d.get('num_comments',0)} comments",
+            "url": f"https://reddit.com{d.get('permalink','')}",
+            "source": f"r/{sub}",
+            "fetched": datetime.datetime.utcnow().isoformat(),
+            "tags": [],
+        }))
+    return out
 
 async def scrape_html(entry, client):
     html = await fetch_html(entry["url"], client)
     soup = BeautifulSoup(html, "lxml")
-    deals = []
-    for elem in soup.select(entry.get("selector", "")):
-        title = (elem.get("alt") or elem.get_text() or entry.get("name", ""))[:120]
-        body = " ".join(elem.stripped_strings)[:200]
-        link = entry.get("url", "")
-        anchor = elem.select_one("a[href]")
-        if anchor and anchor.get("href"):
-            link = anchor.get("href")
-        deals.append(
-            Deal({
-                "title": title,
-                "body": body,
-                "url": link,
-                "source": entry.get("name", ""),
-                "fetched": datetime.datetime.utcnow().isoformat(),
-                "tags": entry.get("tags", []),
-                "min_hot": entry.get(
-                    "min_hot_score", CONF.get("global_min_hot", 0.3)
-                ),
-                "ttl_days": entry.get(
-                    "ttl_days", CONF.get("ttl_default_days", 30)
-                ),
-                "needs_js": entry.get("needs_js", False),
-            })
-        )
-    return deals
+    out = []
+    for b in soup.select(entry.get("selector","")):
+        title = (b.get("alt") or b.get_text() or entry.get("name",""))[:120]
+        body = " ".join(b.stripped_strings)[:200]
+        link = entry.get("url","")
+        a = b.select_one("a[href]")
+        if a and a.get("href"):
+            link = a["href"]
+        out.append(Deal({
+            "title": title,
+            "body": body,
+            "url": link,
+            "source": entry.get("name",""),
+            "fetched": datetime.datetime.utcnow().isoformat(),
+            "tags": entry.get("tags", []),
+            "min_hot": entry.get("min_hot_score", CONF.get("global_min_hot",0.3)),
+            "ttl_days": entry.get("ttl_days", CONF.get("ttl_default_days",30)),
+            "needs_js": entry.get("needs_js", False),
+        }))
+    return out
 
 async def scrape_rss(entry):
-    feed = feedparser.parse(entry.get("url", ""))
-    deals = []
+    feed = feedparser.parse(entry.get("url",""))
+    out = []
     for e in feed.entries[:20]:
-        deals.append(
-            Deal({
-                "title": e.get("title", "")[:120],
-                "body": e.get("summary", "")[:200],
-                "url": e.get("link", ""),
-                "source": entry.get("name", ""),
-                "fetched": datetime.datetime.utcnow().isoformat(),
-                "tags": entry.get("tags", []),
-                "min_hot": entry.get(
-                    "min_hot_score", CONF.get("global_min_hot", 0.3)
-                ),
-                "ttl_days": entry.get(
-                    "ttl_days", CONF.get("ttl_default_days", 30)
-                ),
-            })
-        )
-    return deals
+        out.append(Deal({
+            "title": e.get("title","")[:120],
+            "body": e.get("summary","")[:200],
+            "url": e.get("link",""),
+            "source": entry.get("name",""),
+            "fetched": datetime.datetime.utcnow().isoformat(),
+            "tags": entry.get("tags", []),
+            "min_hot": entry.get("min_hot_score", CONF.get("global_min_hot",0.3)),
+            "ttl_days": entry.get("ttl_days", CONF.get("ttl_default_days",30)),
+        }))
+    return out
 
-# SCORING & DEDUPLICATION
+# SCORING & DEDUPE
 def score_pct(text):
-    match = re.search(r"(\d{1,3})%", text)
-    return int(match.group(1)) / 100 if match else 0
+    m = re.search(r"(\d{1,3})%", text)
+    return int(m.group(1))/100 if m else 0
 
 def hot_score(deal):
-    base = score_pct(deal.get("title", "") + deal.get("body", ""))
-    return max(base, deal.get("min_hot", CONF.get("global_min_hot", 0.3)))
+    base = score_pct(deal.get("title","") + deal.get("body",""))
+    return max(base, deal.get("min_hot", CONF.get("global_min_hot",0.3)))
 
 def make_sig(deal):
-    return re.sub(r"\W+", "", deal.get("title", "").lower())[:80]
+    return re.sub(r"\W+","", deal.get("title","").lower())[:80]
 
 def fuzzy_seen(conn, title):
     rows = conn.execute("SELECT sig FROM seen").fetchall()
     return any(token_set_ratio(r[0], title) > 90 for r in rows)
 
-# DISCORD POST & LOGGING
+# DISCORD POST
 def post_embed(embed, errors):
-    print(f"Posting to {len(WEBHOOKS)} webhook(s): {WEBHOOKS}")
+    print(f"Posting to {len(WEBHOOKS)} webhook(s): {WEBHOOKS}", file=sys.stderr)
     if errors:
-        count = sum(len(es) for es in errors.values())
-        details = [f"[{src}] {msg}" for src, es in errors.items() for msg in es]
+        total = sum(len(es) for es in errors.values())
+        details = [f"[{src}] {msg}" for src,es in errors.items() for msg in es]
         spoiler = "||\n" + "\n".join(details) + "\n||"
-        embed["fields"].append(
-            {"name": f"Errors ({count})", "value": spoiler, "inline": False}
-        )
+        embed["fields"].append({"name": f"Errors ({total})", "value": spoiler, "inline": False})
     else:
-        embed["fields"].append(
-            {"name": "Errors", "value": "_No errors_", "inline": False}
-        )
+        embed["fields"].append({"name":"Errors","value":"_No errors_","inline":False})
 
-    payload = {"embeds": [embed]}
+    payload = {"embeds":[embed]}
     for hook in WEBHOOKS:
         resp = requests.post(hook, json=payload, timeout=15)
         resp.raise_for_status()
 
-# MAIN FUNCTION
+# MAIN
 def main():
     args = parse_args()
     now = datetime.datetime.utcnow()
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-
     client = httpx.AsyncClient(timeout=20)
-    tasks = []
-    sources = []
 
-    for entry in CONF.get("html", []):
-        if args.source and args.source != entry.get("name"):
-            continue
-        if entry.get("needs_js"):
-            continue
-        tasks.append(scrape_html(entry, client))
-        sources.append(entry.get("name"))
+    tasks, sources = [], []
+    for e in CONF.get("html",[]):
+        if args.source and args.source!=e.get("name"): continue
+        if e.get("needs_js"): continue
+        tasks.append(scrape_html(e, client)); sources.append(e.get("name"))
+    for e in CONF.get("rss",[]):
+        if args.source and args.source!=e.get("name"): continue
+        tasks.append(scrape_rss(e)); sources.append(e.get("name"))
+    for cat in CONF.get("categories",{}).values():
+        for sub in cat.get("reddit",[]):
+            if args.source and args.source!=sub: continue
+            tasks.append(scrape_reddit(sub, client)); sources.append(f"r/{sub}")
 
-    for entry in CONF.get("rss", []):
-        if args.source and args.source != entry.get("name"):
-            continue
-        tasks.append(scrape_rss(entry))
-        sources.append(entry.get("name"))
-
-    for cat in CONF.get("categories", {}).values():
-        for sub in cat.get("reddit", []):
-            if args.source and args.source != sub:
-                continue
-            tasks.append(scrape_reddit(sub, client))
-            sources.append(f"r/{sub}")
-
-    results = loop.run_until_complete(
-        asyncio.gather(*tasks, return_exceptions=True)
-    )
+    results = loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
     loop.run_until_complete(client.aclose())
 
-    deals = []
-    errors = {}
-    for src, res in zip(sources, results):
+    deals, errors = [], {}
+    for src,res in zip(sources, results):
         if isinstance(res, Exception):
-            errors.setdefault(src, []).append(str(res))
+            errors.setdefault(src,[]).append(str(res))
         else:
             deals.extend(res)
 
     conn = db_connect()
     fresh = []
-    for deal in deals:
-        sig = make_sig(deal)
-        row = conn.execute(
-            "SELECT posted_at FROM seen WHERE sig=?", (sig,)
-        ).fetchone()
+    for d in deals:
+        sig = make_sig(d)
+        row = conn.execute("SELECT posted_at FROM seen WHERE sig=?", (sig,)).fetchone()
         expired = False
         if row:
             dt = datetime.datetime.fromisoformat(row[0])
-            expired = (now - dt).days > deal.get("ttl_days", 30)
-        if ((not row) or expired) and not fuzzy_seen(
-            conn, deal.get("title", "")
-        ) and hot_score(deal) >= deal.get("min_hot", 0):
-            fresh.append(deal)
-            conn.execute(
-                "REPLACE INTO seen VALUES(?,?)", (sig, now.isoformat())
-            )
-    conn.commit()
-    conn.close()
+            expired = (now-dt).days>d.get("ttl_days",30)
+        if (not row or expired) and not fuzzy_seen(conn,d.get("title","")) and hot_score(d)>=d.get("min_hot",0):
+            fresh.append(d)
+            conn.execute("REPLACE INTO seen VALUES(?,?)",(sig,now.isoformat()))
+    conn.commit(); conn.close()
 
-    # Write metrics.json
-    metrics = {
-        "total_scraped": len(deals),
-        "fresh_deals": [
-            {"source": d.get("source"), "title": d.get("title"), "hot_score": hot_score(d)}
-            for d in fresh
-        ],
-        "errors": errors
-    }
-    with open("metrics.json", "w") as mf:
-        json.dump(metrics, mf)
+    # write metrics.json
+    out = {"total_scraped":len(deals),"fresh_deals":[{"source":d["source"],"title":d["title"],"hot_score":hot_score(d)} for d in fresh],"errors":errors}
+    with open("metrics.json","w") as mf: json.dump(out,mf)
 
     if not args.dry_run:
         if not fresh:
-            embed = {
-                "title": "No Waifus For You Weeb 🙅‍♀️",
-                "description": f"Ran at {now.strftime('%Y-%m-%d %H:%M UTC')} but found no fresh deals.",
-                "fields": []
-            }
-            default_color = CONF.get("colors", {}).get("default")
-            if default_color is not None:
-                embed["color"] = default_color
-            post_embed(embed, errors)
-            return
+            emb={"title":"No Waifus For You Weeb 🙅‍♀️","description":f"Ran at {now.strftime('%Y-%m-%d %H:%M UTC')} but found no fresh deals.","fields":[]}
+            col=CONF.get("colors",{}).get("default"); 
+            emb["color"]=col if col is not None else None
+            post_embed(emb,errors); return
 
-        sorted_fresh = sorted(fresh, key=lambda x: x.get("fetched"), reverse=True)
-        embed = {
-            "title": f"Privacy Deals – {now.strftime('%Y-%m-%d %H:%M UTC')}",
-            "fields": []
-        }
-        default_color = CONF.get("colors", {}).get("default")
-        if default_color is not None:
-            embed["color"] = default_color
-        for d in sorted_fresh[:5]:
-            embed["fields"].append({
-                "name": d.get("title"),
-                "value": f"{d.get('body')}\n{d.get('url')}",
-                "inline": False
-            })
-        post_embed(embed, errors)
-        return
+        sf=sorted(fresh,key=lambda x:x["fetched"],reverse=True)
+        emb={"title":f"Privacy Deals – {now.strftime('%Y-%m-%d %H:%M UTC')}","fields":[]}
+        col=CONF.get("colors",{}).get("default")
+        if col is not None: emb["color"]=col
+        for d in sf[:5]:
+            emb["fields"].append({"name":d["title"],"value":f"{d['body']}\n{d['url']}","inline":False})
+        post_embed(emb,errors); return
 
-    # DRY-RUN OUTPUT
+    # dry-run
     for d in fresh:
-        print(f"[{d.get('source')}] {d.get('title')} – {d.get('url')}")
+        print(f"[{d['source']}] {d['title']} – {d['url']}")
     if errors:
         print(f"Errors ({sum(len(es) for es in errors.values())}):")
-        for src, errs in errors.items():
-            for e in errs:
-                print(f"  [{src}] {e}")
+        for src,es in errors.items():
+            for e in es: print(f"  [{src}] {e}")
     else:
         print("_No errors_")
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
