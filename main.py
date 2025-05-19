@@ -25,7 +25,10 @@ from tenacity import stop_after_attempt
 from tenacity import wait_exponential
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # ───────────────────────── CONFIGURATION ─────────────────────────
@@ -49,7 +52,6 @@ class Deal(dict):
     """Hold deal data"""
     pass
 
-# ───────────────────────── CLI ARGUMENTS ─────────────────────────
 def parse_args():
     parser = argparse.ArgumentParser(description="Run scraper")
     parser.add_argument(
@@ -69,15 +71,23 @@ def parse_args():
     )
     return parser.parse_args()
 
-# ───────────────────────── DATABASE ─────────────────────────
 def db_connect():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS seen (sig TEXT PRIMARY KEY, posted_at TEXT)"
     )
     return conn
 
-# ────────────────────── FETCH UTILITIES ──────────────────────
+def make_sig(deal):
+    """Create a unique signature for a deal to prevent duplicates"""
+    return re.sub(r"\W+", "", deal.get("title", "").lower())[:80]
+
+def fuzzy_seen(conn, title):
+    """Check if a similar title has been seen before"""
+    rows = conn.execute("SELECT sig FROM seen").fetchall()
+    return any(token_set_ratio(r[0], title) > 90 for r in rows)
+
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
 async def fetch_html(url, client: httpx.AsyncClient):
     logger.info(f"Fetching HTML from: {url}")
@@ -92,7 +102,6 @@ async def fetch_json(url, client: httpx.AsyncClient):
     r.raise_for_status()
     return r.json()
 
-# ───────────────────────── PARSERS ─────────────────────────
 def scrape_rss(entry):
     """Synchronous RSS scraping"""
     logger.info(f"Processing RSS feed: {entry.get('url', '')}")
@@ -112,7 +121,7 @@ def scrape_rss(entry):
             "source": entry.get("name",""),
             "fetched": datetime.datetime.utcnow().isoformat(),
             "tags": entry.get("tags", []),
-            "min_hot": entry.get("min_hot_score", CONF.get("global_min_hot",0.1)), # Reduced threshold
+            "min_hot": entry.get("min_hot_score", CONF.get("global_min_hot",0.1)),
             "ttl_days": entry.get("ttl_days", CONF.get("ttl_default_days",30)),
         }))
     return out
@@ -135,7 +144,7 @@ async def scrape_html(entry, client):
             "source": entry.get("name",""),
             "fetched": datetime.datetime.utcnow().isoformat(),
             "tags": entry.get("tags", []),
-            "min_hot": entry.get("min_hot_score", CONF.get("global_min_hot",0.1)), # Reduced threshold
+            "min_hot": entry.get("min_hot_score", CONF.get("global_min_hot",0.1)),
             "ttl_days": entry.get("ttl_days", CONF.get("ttl_default_days",30)),
             "needs_js": entry.get("needs_js", False),
         }))
@@ -155,103 +164,6 @@ async def scrape_reddit(sub, client):
             "tags": [],
         }))
     return out
-
-# Rest of the code remains the same, just update the main() function:
-
-def main():
-    args = parse_args()
-    now = datetime.datetime.utcnow()
-    
-    logger.info("Starting scraper run")
-    logger.info(f"Webhooks configured: {WEBHOOKS}")
-
-    # Process RSS feeds synchronously first
-    rss_results = []
-    for entry in CONF.get("rss",[]):
-        if args.source and args.source != entry.get("name"):
-            continue
-        try:
-            results = scrape_rss(entry)
-            rss_results.extend(results)
-        except Exception as e:
-            logger.error(f"Error processing RSS feed {entry.get('name')}: {e}")
-    
-    # Then handle async tasks
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    client = httpx.AsyncClient(timeout=20)
-
-    tasks, sources = [], []
-    
-    # HTML tasks
-    for e in CONF.get("html",[]):
-        if args.source and args.source!=e.get("name"): 
-            continue
-        if e.get("needs_js"): 
-            continue
-        tasks.append(scrape_html(e, client))
-        sources.append(e.get("name"))
-
-    # Reddit tasks
-    for cat in CONF.get("categories",{}).values():
-        for sub in cat.get("reddit",[]):
-            if args.source and args.source!=sub:
-                continue
-            tasks.append(scrape_reddit(sub, client))
-            sources.append(f"r/{sub}")
-
-    results = loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
-    loop.run_until_complete(client.aclose())
-
-    # Combine all results
-    all_results = rss_results
-    for src, res in zip(sources, results):
-        if isinstance(res, Exception):
-            logger.error(f"Error processing {src}: {res}")
-            continue
-        all_results.extend(res)
-
-    # Process results
-    conn = db_connect()
-    fresh = []
-    for d in all_results:
-        sig = make_sig(d)
-        row = conn.execute("SELECT posted_at FROM seen WHERE sig=?", (sig,)).fetchone()
-        expired = False
-        if row:
-            dt = datetime.datetime.fromisoformat(row[0])
-            expired = (now - dt).days > d.get("ttl_days", 30)
-        if ((not row) or expired) and not fuzzy_seen(conn, d.get("title","")):
-            fresh.append(d)
-            conn.execute("REPLACE INTO seen VALUES(?,?)",(sig,now.isoformat()))
-    
-    conn.commit()
-    conn.close()
-
-    # Write metrics
-    metrics = {
-        "total_scraped": len(all_results),
-        "fresh_deals": [
-            {"source": d["source"], "title": d["title"]}
-            for d in fresh
-        ],
-        "timestamp": now.isoformat()
-    }
-    
-    with open("metrics.json","w") as mf:
-        json.dump(metrics, mf)
-
-    logger.info(f"Found {len(fresh)} fresh deals out of {len(all_results)} total")
-
-    if not args.dry_run and fresh:
-        post_deals_to_discord(fresh, now)
-    elif not args.dry_run:
-        logger.info("No fresh deals to post")
-        post_no_deals_message(now)
-    else:
-        # Print deals for dry run
-        for d in fresh:
-            print(f"[{d['source']}] {d['title']} – {d['url']}")
 
 def post_deals_to_discord(deals, timestamp):
     """Post deals to Discord with better error handling"""
@@ -307,8 +219,122 @@ def post_no_deals_message(timestamp):
         try:
             resp = requests.post(hook, json=payload, timeout=15)
             resp.raise_for_status()
+            logger.info("Posted no-deals message successfully")
         except Exception as e:
             logger.error(f"Failed to post no-deals message: {e}")
+
+def main():
+    args = parse_args()
+    now = datetime.datetime.utcnow()
+    
+    logger.info("Starting scraper run")
+    logger.info(f"Webhooks configured: {WEBHOOKS}")
+
+    # Initialize metrics
+    metrics = {
+        "total_scraped": 0,
+        "fresh_deals": [],
+        "timestamp": now.isoformat(),
+        "errors": []
+    }
+
+    try:
+        # Process RSS feeds synchronously first
+        rss_results = []
+        for entry in CONF.get("rss",[]):
+            if args.source and args.source != entry.get("name"):
+                continue
+            try:
+                results = scrape_rss(entry)
+                rss_results.extend(results)
+            except Exception as e:
+                error_msg = f"Error processing RSS feed {entry.get('name')}: {e}"
+                logger.error(error_msg)
+                metrics["errors"].append(error_msg)
+        
+        # Then handle async tasks
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        client = httpx.AsyncClient(timeout=20)
+
+        tasks, sources = [], []
+        
+        # HTML tasks
+        for e in CONF.get("html",[]):
+            if args.source and args.source!=e.get("name"): 
+                continue
+            if e.get("needs_js"): 
+                continue
+            tasks.append(scrape_html(e, client))
+            sources.append(e.get("name"))
+
+        # Reddit tasks
+        for cat in CONF.get("categories",{}).values():
+            for sub in cat.get("reddit",[]):
+                if args.source and args.source!=sub:
+                    continue
+                tasks.append(scrape_reddit(sub, client))
+                sources.append(f"r/{sub}")
+
+        results = loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+        loop.run_until_complete(client.aclose())
+
+        # Combine all results
+        all_results = rss_results
+        for src, res in zip(sources, results):
+            if isinstance(res, Exception):
+                error_msg = f"Error processing {src}: {res}"
+                logger.error(error_msg)
+                metrics["errors"].append(error_msg)
+                continue
+            all_results.extend(res)
+
+        # Process results
+        conn = db_connect()
+        fresh = []
+        for d in all_results:
+            sig = make_sig(d)
+            row = conn.execute("SELECT posted_at FROM seen WHERE sig=?", (sig,)).fetchone()
+            expired = False
+            if row:
+                dt = datetime.datetime.fromisoformat(row[0])
+                expired = (now - dt).days > d.get("ttl_days", 30)
+            if ((not row) or expired) and not fuzzy_seen(conn, d.get("title","")):
+                fresh.append(d)
+                conn.execute("REPLACE INTO seen VALUES(?,?)",(sig,now.isoformat()))
+        
+        conn.commit()
+        conn.close()
+
+        # Update metrics
+        metrics["total_scraped"] = len(all_results)
+        metrics["fresh_deals"] = [
+            {"source": d["source"], "title": d["title"]}
+            for d in fresh
+        ]
+
+        logger.info(f"Found {len(fresh)} fresh deals out of {len(all_results)} total")
+
+        if not args.dry_run and fresh:
+            post_deals_to_discord(fresh, now)
+        elif not args.dry_run:
+            logger.info("No fresh deals to post")
+            post_no_deals_message(now)
+        else:
+            # Print deals for dry run
+            for d in fresh:
+                print(f"[{d['source']}] {d['title']} – {d['url']}")
+
+    except Exception as e:
+        error_msg = f"Critical error during execution: {e}"
+        logger.error(error_msg)
+        metrics["errors"].append(error_msg)
+        raise
+
+    finally:
+        # Always write metrics file
+        with open("metrics.json", "w") as mf:
+            json.dump(metrics, mf)
 
 if __name__ == "__main__":
     main()
