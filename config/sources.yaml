@@ -1,4 +1,6 @@
-version: 1.2.0
+# Global settings
+global_min_hot: 0.05  # Reduced threshold
+ttl_default_days: 30
 
 # Optional embed colors (Discord decimal RGB)
 colors:
@@ -14,23 +16,21 @@ colors:
   learning:       8636777   # indigo
   security_labs: 10038562   # red-brown
 
-# Global settings
-global_min_hot: 0.1  # Reduced threshold for testing
-ttl_default_days: 30
-
-# RSS Feeds - removed selectors as they're not needed
+# RSS Feeds
 rss:
   - name: "Arxiv CS Updates"
     url: "https://export.arxiv.org/rss/cs.CL"
     tags: ["ai", "research"]
-    min_hot_score: 0.1
+    min_hot_score: 0.05
+    ttl_days: 1  # Check more frequently
 
   - name: "Papers with Code"
     url: "https://paperswithcode.com/rss"
     tags: ["ai", "code"]
-    min_hot_score: 0.1
+    min_hot_score: 0.05
+    ttl_days: 1
 
-# HTML sources remain the same
+# HTML sources
 html:
   - name: GrabOn VPN
     url: https://www.grabon.in/vpn-coupons/
@@ -41,8 +41,6 @@ html:
     url: https://winningpc.com/pcloud-premium-giveaway-promo-codes/
     selector: h2
     tags: ["cloud"]
-
-  # Add other HTML sources as needed...
 
 # Categories for Reddit
 categories:
