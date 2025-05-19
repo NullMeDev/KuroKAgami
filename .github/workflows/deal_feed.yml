@@ -26,6 +26,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Create data directory
+        run: mkdir -p data
+
       - name: Run selector tests
         run: pytest -q tests
 
@@ -41,6 +44,17 @@ jobs:
           script: |
             const fs = require('fs');
             try {
+              if (!fs.existsSync('metrics.json')) {
+                console.log('metrics.json does not exist - likely an error in the scraper run');
+                await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title: `Scraper Error - No Metrics File`,
+                  body: `The scraper failed to create metrics.json. Please check the logs for errors.`
+                });
+                return;
+              }
+              
               const metrics = JSON.parse(fs.readFileSync('metrics.json'));
               if (!metrics.fresh_deals.length) {
                 await github.rest.issues.create({
@@ -51,5 +65,11 @@ jobs:
                 });
               }
             } catch (error) {
-              console.error('Error reading metrics:', error);
+              console.error('Error checking metrics:', error);
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `Error Reading Metrics`,
+                body: `Failed to process metrics.json: ${error.message}`
+              });
             }
