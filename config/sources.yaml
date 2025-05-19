@@ -22,7 +22,7 @@ rss:
     url: "https://export.arxiv.org/rss/cs.CL"
     tags: ["ai", "research"]
     min_hot_score: 0.05
-    ttl_days: 1
+    ttl_days: 1  # Check more frequently
 
   - name: "Papers with Code"
     url: "https://paperswithcode.com/rss"
